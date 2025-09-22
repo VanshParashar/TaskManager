@@ -32,15 +32,24 @@ class TaskBloc extends Bloc<TaskEvent, TaskState> {
     try {
       emit(TaskLoading());
       final tasks = await getTasks();
+
+      // Preserve previous filter if available; otherwise default to all
+      final TaskFilter currentFilter =
+      (state is TaskLoaded) ? (state as TaskLoaded).currentFilter : TaskFilter.all;
+
+      final filteredTasks = _filterTasks(tasks, currentFilter);
+
       emit(TaskLoaded(
         tasks: tasks,
-        filteredTasks: tasks,
-        currentFilter: TaskFilter.all,
+        filteredTasks: filteredTasks,
+        currentFilter: currentFilter,
       ));
     } catch (e) {
       emit(TaskError('Failed to load tasks: ${e.toString()}'));
     }
   }
+
+
 
   Future<void> _onAddTask(AddTaskEvent event, Emitter<TaskState> emit) async {
     if (state is TaskLoaded) {
@@ -107,13 +116,72 @@ class TaskBloc extends Bloc<TaskEvent, TaskState> {
   void _onReorderTasks(ReorderTasks event, Emitter<TaskState> emit) {
     if (state is TaskLoaded) {
       final currentState = state as TaskLoaded;
-      final tasks = List.of(currentState.filteredTasks);
-      final task = tasks.removeAt(event.oldIndex);
-      tasks.insert(event.newIndex, task);
 
-      emit(currentState.copyWith(filteredTasks: tasks));
+      // Work on copies
+      final all = List<Task>.from(currentState.tasks);
+      final visible = List<Task>.from(currentState.filteredTasks);
+
+      var oldVisibleIndex = event.oldIndex;
+      var newVisibleIndex = event.newIndex;
+
+      // When moving down the list, ReorderableListView's newIndex is one greater
+      if (oldVisibleIndex < newVisibleIndex) newVisibleIndex -= 1;
+
+      // Clamp new index to valid range for the visible list
+      if (newVisibleIndex < 0) newVisibleIndex = 0;
+      if (newVisibleIndex > visible.length) newVisibleIndex = visible.length;
+
+      // Guard: ensure old index is valid
+      if (oldVisibleIndex < 0 || oldVisibleIndex >= visible.length) {
+        // nothing to do
+        return;
+      }
+
+      // Remove from visible and insert at new visible position
+      final moved = visible.removeAt(oldVisibleIndex);
+      visible.insert(newVisibleIndex, moved);
+
+      // Now apply the same change to the full list `all`.
+      final originalIndex = all.indexWhere((t) => t.id == moved.id);
+      if (originalIndex == -1) {
+        // fallback: if item not found in full list, just emit the updated filtered list
+        emit(currentState.copyWith(filteredTasks: visible));
+        return;
+      }
+
+      // Remove item from its original position in 'all'
+      all.removeAt(originalIndex);
+
+      // Determine the target index in 'all' to insert the moved item.
+      int targetIndex;
+      if (newVisibleIndex >= visible.length - 1) {
+        // Inserting at/after last visible item: append after the last visible item in 'all'
+        if (visible.isEmpty) {
+          targetIndex = all.length;
+        } else {
+          final lastVisibleId = visible.last.id;
+          final lastIdx = all.indexWhere((t) => t.id == lastVisibleId);
+          targetIndex = (lastIdx == -1) ? all.length : lastIdx + 1;
+        }
+      } else {
+        // Insert before the item now at newVisibleIndex in the visible list
+        final neighborId = visible[newVisibleIndex].id;
+        final neighborIdx = all.indexWhere((t) => t.id == neighborId);
+        targetIndex = (neighborIdx == -1) ? all.length : neighborIdx;
+      }
+
+      // Clamp targetIndex to valid bounds for 'all'
+      if (targetIndex < 0) targetIndex = 0;
+      if (targetIndex > all.length) targetIndex = all.length;
+
+      // Insert into full list
+      all.insert(targetIndex, moved);
+
+      // Emit updated state: update both tasks and filteredTasks
+      emit(currentState.copyWith(tasks: all, filteredTasks: visible));
     }
   }
+
 
   List<Task> _filterTasks(List<Task> tasks, TaskFilter filter) {
     switch (filter) {
